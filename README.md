@@ -23,7 +23,7 @@ package main
 
 import (
     "fmt"
-    "github.com/bm-197/tibeb/pkg/validate"
+    "github.com/bm-197/tibeb/tibeb/pkg/validate"
 )
 
 type User struct {
