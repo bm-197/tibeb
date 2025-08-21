@@ -17,7 +17,7 @@ Tibeb is a type-safe, composable validation library for Go, inspired by librarie
 ## Installation
 
 ```bash
-go get github.com/yourusername/tibeb
+go get github.com/bm-197/tibeb
 ```
 
 ## Quick Start
@@ -27,7 +27,7 @@ package main
 
 import (
     "fmt"
-    "github.com/yourusername/tibeb/pkg/validate"
+    "github.com/bm-197/tibeb/tibeb/pkg/validate"
 )
 
 type User struct {
