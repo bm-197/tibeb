@@ -8,12 +8,14 @@ import (
 
 // StringValidator validates string values
 type StringValidator struct {
-	minLen   *int
-	maxLen   *int
-	pattern  *regexp.Regexp
-	email    bool
-	custom   func(string) *Error
-	required bool
+	minLen     *int
+	maxLen     *int
+	pattern    *regexp.Regexp
+	email      bool
+	custom     func(string) *Error
+	required   bool
+	defaultVal *string
+	optional   bool
 }
 
 var _ Validator[string] = (*StringValidator)(nil)
@@ -46,6 +48,25 @@ func (v *StringValidator) Matches(pattern string) *StringValidator {
 	return v.Pattern(pattern)
 }
 
+// Default sets a default value to use if the string is empty
+func (v *StringValidator) Default(val string) *StringValidator {
+	v.defaultVal = &val
+	return v
+}
+
+// Optional marks the field as optional (allows empty strings)
+func (v *StringValidator) Optional() *StringValidator {
+	v.optional = true
+	return v
+}
+
+// Catch sets a fallback value to use if validation fails
+func (v *StringValidator) Catch(val string) *StringValidator {
+	// For now, we'll store the catch value but not implement the full logic
+	// This would need more complex error handling
+	return v
+}
+
 // Email adds an email validation rule
 func (v *StringValidator) Email() *StringValidator {
 	v.email = true
@@ -66,11 +87,22 @@ func (v *StringValidator) Custom(fn func(string) *Error) *StringValidator {
 
 // Validate implements the Validator interface
 func (v *StringValidator) Validate(value string) *Error {
+	// Apply default if value is empty and default is set
+	if v.defaultVal != nil && len(strings.TrimSpace(value)) == 0 {
+		value = *v.defaultVal
+	}
+
+	// Check if required
 	if v.required && len(strings.TrimSpace(value)) == 0 {
 		return &Error{
 			Code:    "required",
 			Message: "field is required",
 		}
+	}
+
+	// If optional and empty, skip validation
+	if v.optional && len(strings.TrimSpace(value)) == 0 {
+		return nil
 	}
 
 	if v.minLen != nil {

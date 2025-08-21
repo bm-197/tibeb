@@ -23,7 +23,13 @@ type Config struct {
 type ValidationField struct {
 	Name       string
 	Type       string
-	Validators []string
+	Validators []ValidatorCall
+}
+
+// ValidatorCall represents a validator method call with its arguments
+type ValidatorCall struct {
+	Method string
+	Args   []string
 }
 
 // ValidationSchema represents a validation schema
@@ -108,59 +114,60 @@ func findValidationSchemas(f *ast.File) []ValidationSchema {
 
 // extractValidationSchema extracts validation schema from an AST expression
 func extractValidationSchema(expr ast.Expr) *ValidationSchema {
-	// Look for validate.Struct[Type]() call
-	if call, ok := expr.(*ast.CallExpr); ok {
-		// Find the root call in the chain
-		rootCall := findRootCall(call)
-		if rootCall == nil {
-			return nil
-		}
+	// Look for the outermost call in the chain - this should be the last Field() call
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
 
-		// Extract schema type and create schema
-		var schema *ValidationSchema
-		if sel, ok := rootCall.Fun.(*ast.SelectorExpr); ok {
-			if indexExpr, ok := sel.X.(*ast.IndexExpr); ok {
-				if rootSel, ok := indexExpr.X.(*ast.SelectorExpr); ok {
-					if pkg, ok := rootSel.X.(*ast.Ident); ok && pkg.Name == "validate" && rootSel.Sel.Name == "Struct" {
-						if typeIdent, ok := indexExpr.Index.(*ast.Ident); ok {
-							schema = &ValidationSchema{
-								TypeName: typeIdent.Name,
-								Fields:   make([]ValidationField, 0),
-							}
-						}
+	// Find the root validate.Struct[Type]() call by traversing down the chain
+	rootCall := findRootCall(call)
+	if rootCall == nil {
+		return nil
+	}
+
+	// Extract schema type from the root call
+	var schema *ValidationSchema
+	if indexExpr, ok := rootCall.Fun.(*ast.IndexExpr); ok {
+		if sel, ok := indexExpr.X.(*ast.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "validate" && sel.Sel.Name == "Struct" {
+				if typeIdent, ok := indexExpr.Index.(*ast.Ident); ok {
+					schema = &ValidationSchema{
+						TypeName: typeIdent.Name,
+						Fields:   make([]ValidationField, 0),
 					}
 				}
 			}
 		}
+	}
 
-		if schema == nil {
-			return nil
-		}
+	if schema == nil {
+		return nil
+	}
 
-		// Walk up the chain to collect all Field() calls
-		current := call
-		for current != nil {
-			if sel, ok := current.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Field" {
-					field := extractFieldValidation(current)
-					if field != nil {
-						schema.Fields = append([]ValidationField{*field}, schema.Fields...)
-					}
+	// Collect all Field() calls in the chain
+	current := call
+	for current != nil {
+		if sel, ok := current.Fun.(*ast.SelectorExpr); ok {
+			if sel.Sel.Name == "Field" {
+				field := extractFieldValidation(current)
+				if field != nil {
+					// Prepend to maintain order (since we're going backwards)
+					schema.Fields = append([]ValidationField{*field}, schema.Fields...)
 				}
-				if callExpr, ok := sel.X.(*ast.CallExpr); ok {
-					current = callExpr
-				} else {
-					break
-				}
+			}
+			// Move to the next call in the chain
+			if callExpr, ok := sel.X.(*ast.CallExpr); ok {
+				current = callExpr
 			} else {
 				break
 			}
+		} else {
+			break
 		}
-
-		return schema
 	}
 
-	return nil
+	return schema
 }
 
 // findRootCall finds the root validate.Struct call in a chain
@@ -216,8 +223,8 @@ func inferFieldType(results *ast.FieldList) string {
 }
 
 // extractValidators extracts validators from a validator chain
-func extractValidators(expr ast.Expr) []string {
-	var validators []string
+func extractValidators(expr ast.Expr) []ValidatorCall {
+	var validators []ValidatorCall
 	current := expr
 
 	for {
@@ -231,8 +238,34 @@ func extractValidators(expr ast.Expr) []string {
 			break
 		}
 
-		// Add validator name
-		validators = append([]string{sel.Sel.Name}, validators...)
+		// Skip the initial type constructor calls (String(), Int(), etc.)
+		methodName := sel.Sel.Name
+		if methodName == "String" || methodName == "Int" {
+			// Check if this is a type constructor (no args and called on validate package)
+			if len(call.Args) == 0 {
+				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "validate" {
+					current = sel.X
+					continue
+				}
+			}
+		}
+
+		// Extract arguments for this validator method
+		var args []string
+		for _, arg := range call.Args {
+			if basicLit, ok := arg.(*ast.BasicLit); ok {
+				args = append(args, basicLit.Value)
+			} else if ident, ok := arg.(*ast.Ident); ok {
+				args = append(args, ident.Name)
+			}
+		}
+
+		// Add validator call
+		validatorCall := ValidatorCall{
+			Method: methodName,
+			Args:   args,
+		}
+		validators = append([]ValidatorCall{validatorCall}, validators...)
 
 		// Move to next in chain
 		current = sel.X
@@ -258,25 +291,29 @@ func generateValidator(config *Config, schema ValidationSchema) error {
 	}
 	defer f.Close()
 
-	// Parse validator template
-	tmpl, err := template.New("validator").Parse(`// Code generated by tibeb. DO NOT EDIT.
+	// Parse validator template with custom functions
+	tmpl, err := template.New("validator").Funcs(template.FuncMap{
+		"capitalizeFirst": func(s string) string {
+			if len(s) == 0 {
+				return s
+			}
+			return strings.ToUpper(s[:1]) + s[1:]
+		},
+	}).Parse(`// Code generated by tibeb. DO NOT EDIT.
 package {{ .Package }}
 
 import (
 	"github.com/bm-197/tibeb/pkg/validate"
 )
 
-// Validate validates the {{ .Schema.TypeName }} struct
-func (v {{ .Schema.TypeName }}) Validate() error {
+// Validate{{ .Schema.TypeName }} validates the {{ .Schema.TypeName }} struct
+func Validate{{ .Schema.TypeName }}(v {{ .Schema.TypeName }}) *validate.Errors {
 	return {{ .Schema.TypeName }}Schema.Validate(v)
 }
 
 // {{ .Schema.TypeName }}Schema is the validation schema for {{ .Schema.TypeName }}
-var {{ .Schema.TypeName }}Schema = validate.Struct[{{ .Schema.TypeName }}]().
-	{{- range .Schema.Fields }}
-	Field(func(v {{ $.Schema.TypeName }}) {{ .Type }} { return v.{{ .Name }} }, validate.{{ .Type }}()
-		{{- range .Validators }}.{{ . }}{{ end }})
-	{{- end }}
+var {{ .Schema.TypeName }}Schema = validate.Struct[{{ .Schema.TypeName }}](){{- range .Schema.Fields }}.
+	Field(func(v {{ $.Schema.TypeName }}) {{ .Type }} { return v.{{ .Name }} }, validate.{{ capitalizeFirst .Type }}(){{- range .Validators }}.{{ .Method }}({{ range $i, $arg := .Args }}{{ if $i }}, {{ end }}{{ $arg }}{{ end }}){{ end }}){{- end }}
 `)
 	if err != nil {
 		return fmt.Errorf("parsing template: %w", err)
